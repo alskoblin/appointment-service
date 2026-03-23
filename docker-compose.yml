@@ -1,0 +1,226 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: appointment-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deployments/postgres/init-databases.sql:/docker-entrypoint-initdb.d/01-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  kafka:
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    container_name: appointment-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9095,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9095
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_KRAFT_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "${KAFKA_PORT:-9095}:9095"
+
+  migrate-booking:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command:
+      [
+        "-path",
+        "/migrations/booking",
+        "-database",
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/booking_db?sslmode=disable",
+        "up"
+      ]
+    volumes:
+      - ./migrations:/migrations
+
+  migrate-notification:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command:
+      [
+        "-path",
+        "/migrations/notification",
+        "-database",
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/notification_db?sslmode=disable",
+        "up"
+      ]
+    volumes:
+      - ./migrations:/migrations
+
+  migrate-calendar:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command:
+      [
+        "-path",
+        "/migrations/calendar",
+        "-database",
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/calendar_db?sslmode=disable",
+        "up"
+      ]
+    volumes:
+      - ./migrations:/migrations
+
+  migrate-billing:
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command:
+      [
+        "-path",
+        "/migrations/billing",
+        "-database",
+        "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/billing_db?sslmode=disable",
+        "up"
+      ]
+    volumes:
+      - ./migrations:/migrations
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_CMD: ./cmd/app
+    container_name: booking-service
+    restart: unless-stopped
+    depends_on:
+      migrate-booking:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      BOOKING_APP_PORT: ${BOOKING_APP_PORT:-8080}
+      BOOKING_DB_HOST: postgres
+      BOOKING_DB_PORT: 5432
+      BOOKING_DB_NAME: booking_db
+      BOOKING_DB_USER: ${POSTGRES_USER:-postgres}
+      BOOKING_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      BOOKING_DB_SSLMODE: disable
+      BOOKING_JWT_SECRET: ${BOOKING_JWT_SECRET:-dev-secret-change-me}
+      BOOKING_JWT_TTL_MINUTES: ${BOOKING_JWT_TTL_MINUTES:-720}
+      KAFKA_BROKERS: kafka:9095
+      KAFKA_APPOINTMENTS_TOPIC: ${KAFKA_APPOINTMENTS_TOPIC:-appointments.events.v1}
+    ports:
+      - "${BOOKING_APP_PORT:-8080}:8080"
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_CMD: ./cmd/notification
+    container_name: notification-service
+    restart: unless-stopped
+    depends_on:
+      migrate-notification:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      NOTIFICATION_DB_HOST: postgres
+      NOTIFICATION_DB_PORT: 5432
+      NOTIFICATION_DB_NAME: notification_db
+      NOTIFICATION_DB_USER: ${POSTGRES_USER:-postgres}
+      NOTIFICATION_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      NOTIFICATION_DB_SSLMODE: disable
+      KAFKA_BROKERS: kafka:9095
+      KAFKA_APPOINTMENTS_TOPIC: ${KAFKA_APPOINTMENTS_TOPIC:-appointments.events.v1}
+      KAFKA_NOTIFICATION_GROUP: ${KAFKA_NOTIFICATION_GROUP:-notification-service-v1}
+
+  calendar-sync-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_CMD: ./cmd/calendar
+    container_name: calendar-sync-service
+    restart: unless-stopped
+    depends_on:
+      migrate-calendar:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      CALENDAR_DB_HOST: postgres
+      CALENDAR_DB_PORT: 5432
+      CALENDAR_DB_NAME: calendar_db
+      CALENDAR_DB_USER: ${POSTGRES_USER:-postgres}
+      CALENDAR_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      CALENDAR_DB_SSLMODE: disable
+      KAFKA_BROKERS: kafka:9095
+      KAFKA_APPOINTMENTS_TOPIC: ${KAFKA_APPOINTMENTS_TOPIC:-appointments.events.v1}
+      KAFKA_CALENDAR_GROUP: ${KAFKA_CALENDAR_GROUP:-calendar-sync-service-v1}
+
+  billing-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_CMD: ./cmd/billing
+    container_name: billing-service
+    restart: unless-stopped
+    depends_on:
+      migrate-billing:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      BILLING_APP_PORT: ${BILLING_APP_PORT:-8081}
+      BILLING_DB_HOST: postgres
+      BILLING_DB_PORT: 5432
+      BILLING_DB_NAME: billing_db
+      BILLING_DB_USER: ${POSTGRES_USER:-postgres}
+      BILLING_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      BILLING_DB_SSLMODE: disable
+      KAFKA_BROKERS: kafka:9095
+      KAFKA_APPOINTMENTS_TOPIC: ${KAFKA_APPOINTMENTS_TOPIC:-appointments.events.v1}
+      KAFKA_BILLING_GROUP: ${KAFKA_BILLING_GROUP:-billing-service-v1}
+      BILLING_DEFAULT_AMOUNT_CENTS: ${BILLING_DEFAULT_AMOUNT_CENTS:-5000}
+      BILLING_CURRENCY: ${BILLING_CURRENCY:-RUB}
+      BILLING_PAYMENTS_ENABLED: ${BILLING_PAYMENTS_ENABLED:-true}
+    ports:
+      - "${BILLING_APP_PORT:-8081}:8081"
+
+volumes:
+  postgres_data:
