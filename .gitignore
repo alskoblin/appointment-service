@@ -1,0 +1,10 @@
+.env
+.gocache/
+.gotmp/
+/tmp/
+.DS_Store
+app
+billing
+calendar
+notification
+*.log
